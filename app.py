@@ -16,6 +16,8 @@ st.set_page_config(layout="wide")
 # State Management
 if 'q_index' not in st.session_state: st.session_state.q_index = 0
 if 'transcription' not in st.session_state: st.session_state.transcription = ""
+if 'text_input' not in st.session_state: st.session_state.text_input = ""
+if 'audio_file' not in st.session_state: st.session_state.audio_file = None
 
 async def text_to_speech(text, voice):
     communicate = edge_tts.Communicate(text, voice)
@@ -29,7 +31,6 @@ with col1:
     current_q = QUESTIONS[st.session_state.q_index]
     st.write(f"### {current_q}")
     
-    # Official Indian & US Voice IDs
     voice_map = {
         "Indian (Male)": "en-IN-PrabhatNeural",
         "Indian (Female)": "en-IN-NeerjaNeural",
@@ -37,46 +38,50 @@ with col1:
         "Emma (US)": "en-US-EmmaNeural"
     }
     voice_choice = st.selectbox("Select TTS Voice", list(voice_map.keys()))
-    voice_option = voice_map[voice_choice]
     
     if st.button("🔊 Play Question"):
-        asyncio.run(text_to_speech(current_q, voice_option))
+        asyncio.run(text_to_speech(current_q, voice_map[voice_choice]))
         st.audio("question.mp3")
 
 with col2:
     st.subheader("Your Response")
     
-    # Setup columns for Radio and the 'i' Info icon
     col2a, col2b = st.columns([10, 1])
     with col2a:
         mode = st.radio("Choose input method:", ["Type Answer", "Record Audio"], horizontal=True)
     with col2b:
-        # Native Streamlit hover tooltip
-        st.markdown("###", help="""Recording Tips:
+        st.markdown("### ", help="""Recording Tips:
 1. Click record to start.
 2. If unsatisfied, click again to rerecord.
-3. Review your text in the read-only box below.
+3. Your transcript will appear in the read-only box below.
 4. Click Save Answer to finalize.""")
 
     if mode == "Record Audio":
+        # Capture audio and persist in session
         audio_value = st.audio_input("Record your answer")
         if audio_value:
+            st.session_state.audio_file = audio_value.read()
             with open("answer.wav", "wb") as f:
-                f.write(audio_value.read())
-            # Transcribe
+                f.write(st.session_state.audio_file)
             result = model.transcribe("answer.wav")
             st.session_state.transcription = result["text"]
         
-        st.text_area("Transcription (Review Only)", value=st.session_state.transcription, disabled=True)
-    else:
-        # Manual typing mode
-        st.session_state.transcription = st.text_area("Type your answer", value=st.session_state.transcription)
+        # Display playback if audio exists
+        if st.session_state.audio_file:
+            st.audio(st.session_state.audio_file)
+            st.text_area("Transcription (Review Only)", value=st.session_state.transcription, disabled=True)
     
-    # Save/Submit Button
+    else:
+        # Manual typing mode uses a separate session state
+        st.session_state.text_input = st.text_area("Type your answer", value=st.session_state.text_input)
+    
     if st.button("💾 Save Answer"):
         if st.session_state.q_index < len(QUESTIONS) - 1:
             st.session_state.q_index += 1
+            # Reset state for next question
             st.session_state.transcription = ""
+            st.session_state.text_input = ""
+            st.session_state.audio_file = None
             st.rerun()
         else:
             st.success("All questions completed!")
