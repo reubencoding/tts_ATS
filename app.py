@@ -147,6 +147,32 @@ def process_audio(audio_bytes):
                 
         full_transcript = " ".join(transcript_parts).strip()
         
+        # --- Chunked Speaker Vector Extraction ---
+        chunk_vectors = []
+        chunk_length_ms = 3000  # 3 seconds
+        audio_len_ms = len(audio)
+        
+        for i in range(0, audio_len_ms, chunk_length_ms):
+            chunk = audio[i:i+chunk_length_ms]
+            if len(chunk) < 1500:
+                continue
+            
+            # Extract raw 16kHz mono bytes from the chunk
+            chunk_bytes = chunk.raw_data
+            
+            chunk_rec = vosk.KaldiRecognizer(vosk_model, 16000)
+            chunk_rec.SetSpkModel(spk_model)
+            chunk_rec.AcceptWaveform(chunk_bytes)
+            
+            chunk_res = json.loads(chunk_rec.FinalResult())
+            if 'spk' in chunk_res:
+                # Ensure the chunk contains active speech
+                if 'text' in chunk_res and chunk_res['text'].strip():
+                    chunk_vectors.append(chunk_res['spk'])
+                    
+        # Failsafe: Fall back to continuous loop vectors if no chunk-level vectors were detected
+        final_vectors = chunk_vectors if len(chunk_vectors) > 0 else vectors
+        
         # --- Advanced Analytics Extraction ---
         wpm = 0
         thought_gaps = []
@@ -167,7 +193,7 @@ def process_audio(audio_bytes):
                         "duration": round(gap, 2)
                     })
                     
-        return full_transcript, np.array(vectors), wpm, thought_gaps
+        return full_transcript, np.array(final_vectors), wpm, thought_gaps
     except Exception as e:
         st.error(f"Error during Speech-to-Text: {e}")
         return "", np.array([]), 0, []
@@ -225,7 +251,7 @@ This ensures your vocal acoustics match the registered candidate voice baseline 
                     voice_passed = False
                     voice_similarity = 0.0
                     
-                    if len(vectors) >= 3 and st.session_state.registered_speaker is not None:
+                    if len(vectors) >= 2 and st.session_state.registered_speaker is not None:
                         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
                         norms = np.where(norms == 0, 1e-6, norms)
                         vectors_norm = vectors / norms
@@ -401,8 +427,8 @@ else:
                         st.session_state.current_wpm = wpm
                         st.session_state.current_gaps = thought_gaps
                         
-                        # Perform speaker verification using Silhouette Score
-                        if len(vectors) < 3:
+                        # Perform speaker verification using robust centroid-based Cosine Similarity
+                        if len(vectors) < 2:
                             st.session_state.speaker_status = {
                                 "status": "info",
                                 "message": f"Audio response too short to perform reliable speaker verification. WPM: {wpm}."
@@ -414,17 +440,30 @@ else:
                                 norms = np.where(norms == 0, 1e-6, norms)
                                 vectors_norm = vectors / norms
                                 
-                                # Fit KMeans
+                                # Fit KMeans to split into 2 clusters
                                 kmeans = KMeans(n_clusters=2, n_init=10, random_state=42).fit(vectors_norm)
+                                labels = kmeans.labels_
                                 
-                                # Calculate Silhouette Score
-                                score = silhouette_score(vectors_norm, kmeans.labels_)
+                                if np.sum(labels == 0) > 0 and np.sum(labels == 1) > 0:
+                                    # Extract cluster centroids
+                                    c1 = np.mean(vectors_norm[labels == 0], axis=0)
+                                    c2 = np.mean(vectors_norm[labels == 1], axis=0)
+                                    
+                                    # Normalize centroids
+                                    c1 = c1 / np.linalg.norm(c1) if np.linalg.norm(c1) > 0 else c1
+                                    c2 = c2 / np.linalg.norm(c2) if np.linalg.norm(c2) > 0 else c2
+                                    
+                                    # Calculate cosine similarity between cluster centroids
+                                    centroid_sim = np.dot(c1, c2)
+                                else:
+                                    centroid_sim = 1.0
                                 
                                 # 1. Check for Intra-Question proxy (multiple speakers in current answer)
-                                if score > 0.3:
+                                # A voice similarity threshold of 0.65 separates same vs different speaker
+                                if centroid_sim < 0.65:
                                     st.session_state.speaker_status = {
                                         "status": "warning",
-                                        "message": f"⚠️ Alert: Multiple speakers detected within this response (Similarity gap: {score:.2f}). Potential proxy interview."
+                                        "message": f"⚠️ Alert: Multiple speakers detected within this response (Voice similarity: {centroid_sim:.2f}). Potential proxy interview."
                                     }
                                 else:
                                     # 2. Check for Inter-Question proxy (speaker swapping between questions)
@@ -436,7 +475,7 @@ else:
                                         st.session_state.registered_speaker = current_profile
                                         st.session_state.speaker_status = {
                                             "status": "success",
-                                            "message": f"✅ Single speaker confirmed. Vocal profile registered. Speech speed: {wpm} WPM."
+                                            "message": f"✅ Single speaker confirmed (Intra-voice similarity: {centroid_sim:.2f}). Vocal profile registered. Speech speed: {wpm} WPM."
                                         }
                                     else:
                                         # Subsequent questions similarity validation
@@ -457,7 +496,7 @@ else:
                             except Exception as e:
                                 st.session_state.speaker_status = {
                                     "status": "info",
-                                    "message": "Speaker verification processed successfully."
+                                    "message": f"Speaker verification processed successfully. {e}"
                                 }
             
             # Display results if present
